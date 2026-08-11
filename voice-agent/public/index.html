@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Voice Agent</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #fff; color: #111827; min-height: 100vh;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      padding: 2rem;
+    }
+    h1 { font-size: 1.8rem; margin-bottom: 1.5rem; text-align: center; }
+    .card {
+      width: 100%; max-width: 480px; background: #fff; border: 1px solid #F3F4F6;
+      border-radius: 1.25rem; box-shadow: 0 4px 32px rgba(0,0,0,.07);
+      padding: 1.5rem; display: flex; flex-direction: column; gap: 1rem;
+    }
+    input {
+      width: 100%; padding: .9rem 1rem; border: 1.5px solid #E5E7EB; border-radius: .75rem;
+      font-size: .9rem; outline: none;
+    }
+    button {
+      padding: .9rem 1.5rem; border: none; border-radius: .75rem; font-size: .9rem;
+      font-weight: 700; cursor: pointer; background: #111827; color: #fff;
+    }
+    button:disabled { background: #E5E7EB; color: #9CA3AF; cursor: not-allowed; }
+    #talkBtn { user-select: none; }
+    #talkBtn.recording { background: #DC2626; }
+    #status { font-size: .85rem; color: #6B7280; text-align: center; min-height: 1.2em; }
+    #transcript { display: flex; flex-direction: column; gap: .5rem; max-height: 240px; overflow-y: auto; }
+    .msg { padding: .55rem .9rem; border-radius: .75rem; font-size: .85rem; line-height: 1.5; max-width: 85%; }
+    .msg.user { align-self: flex-end; background: #FFE98A; color: #78350F; }
+    .msg.assistant { align-self: flex-start; background: #F9FAFB; border: 1px solid #F3F4F6; color: #374151; }
+    .hidden { display: none !important; }
+    #errorBox { padding: .75rem 1rem; background: #FEF2F2; border: 1px solid #FECACA; border-radius: .75rem; font-size: .85rem; color: #EF4444; }
+  </style>
+</head>
+<body>
+
+  <h1>Talk to your AI agent</h1>
+
+  <div class="card">
+    <div id="setup">
+      <input type="url" id="urlInput" placeholder="https://yourwebsite.com" />
+      <button id="buildBtn" style="margin-top:.75rem;width:100%">Build agent</button>
+    </div>
+
+    <div id="errorBox" class="hidden"></div>
+
+    <div id="callArea" class="hidden">
+      <div id="status">Hold the button and speak</div>
+      <button id="talkBtn" style="width:100%">Hold to talk</button>
+      <div id="transcript"></div>
+    </div>
+  </div>
+
+<script>
+  const $ = id => document.getElementById(id);
+  let systemPrompt = '';
+  let history = [];
+  let mediaRecorder = null;
+  let chunks = [];
+
+  function showError(msg) {
+    $('errorBox').textContent = msg;
+    $('errorBox').classList.remove('hidden');
+  }
+  function clearError() {
+    $('errorBox').classList.add('hidden');
+  }
+
+  $('buildBtn').addEventListener('click', async () => {
+    const url = $('urlInput').value.trim();
+    if (!url) return;
+    clearError();
+    $('buildBtn').disabled = true;
+    $('buildBtn').textContent = 'Building…';
+    try {
+      const res = await fetch('/api/scrape', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to build agent.');
+      systemPrompt = data.systemPrompt;
+      history = [];
+      $('setup').classList.add('hidden');
+      $('callArea').classList.remove('hidden');
+    } catch (err) {
+      showError(err.message);
+    } finally {
+      $('buildBtn').disabled = false;
+      $('buildBtn').textContent = 'Build agent';
+    }
+  });
+
+  function addBubble(role, text) {
+    const el = document.createElement('div');
+    el.className = `msg ${role}`;
+    el.textContent = text;
+    $('transcript').appendChild(el);
+    $('transcript').scrollTop = $('transcript').scrollHeight;
+  }
+
+  async function startRecording() {
+    clearError();
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    chunks = [];
+    mediaRecorder = new MediaRecorder(stream);
+    mediaRecorder.ondataavailable = e => chunks.push(e.data);
+    mediaRecorder.onstop = onRecordingStop;
+    mediaRecorder.start();
+    $('talkBtn').classList.add('recording');
+    $('talkBtn').textContent = 'Release to send';
+    $('status').textContent = 'Listening…';
+  }
+
+  function stopRecording() {
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+    $('talkBtn').classList.remove('recording');
+    $('talkBtn').textContent = 'Hold to talk';
+  }
+
+  async function onRecordingStop() {
+    const blob = new Blob(chunks, { type: 'audio/webm' });
+    if (blob.size < 500) { $('status').textContent = 'Hold the button and speak'; return; }
+    $('status').textContent = 'Thinking…';
+    $('talkBtn').disabled = true;
+    try {
+      const audioBase64 = await blobToBase64(blob);
+      const res = await fetch('/api/respond', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ audioBase64, mimeType: 'audio/webm', systemPrompt, history }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Something went wrong.');
+
+      addBubble('user', data.userText);
+      addBubble('assistant', data.assistantText);
+      history.push({ role: 'user', content: data.userText });
+      history.push({ role: 'assistant', content: data.assistantText });
+
+      const audio = new Audio(`data:${data.audioMimeType};base64,${data.audioBase64}`);
+      $('status').textContent = 'Speaking…';
+      audio.onended = () => { $('status').textContent = 'Hold the button and speak'; };
+      await audio.play();
+    } catch (err) {
+      showError(err.message);
+      $('status').textContent = 'Hold the button and speak';
+    } finally {
+      $('talkBtn').disabled = false;
+    }
+  }
+
+  function blobToBase64(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result.split(',')[1]);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  $('talkBtn').addEventListener('mousedown', startRecording);
+  $('talkBtn').addEventListener('mouseup', stopRecording);
+  $('talkBtn').addEventListener('mouseleave', () => { if (mediaRecorder && mediaRecorder.state === 'recording') stopRecording(); });
+  $('talkBtn').addEventListener('touchstart', e => { e.preventDefault(); startRecording(); });
+  $('talkBtn').addEventListener('touchend', e => { e.preventDefault(); stopRecording(); });
+</script>
+
+</body>
+</html>
