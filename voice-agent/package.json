@@ -1,5 +1,5 @@
 {
-  "name": "voice-agent-backend",
+  "name": "betty-ai-backend",
   "private": true,
   "dependencies": {
     "openai": "^4.68.0",
